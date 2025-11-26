@@ -8,19 +8,23 @@ const CANVAS_HEIGHT = 600;
 const FPS = 60;
 
 // Speed Balancing
-const MAX_SPEED = 12.5;    // Player max speed reduced (was 14) to be closer to Yeti (12)
+const MAX_SPEED = 12.5;    // Player max speed
 const ABSOLUTE_MAX_SPEED = 22; // Hard cap for boost pads
 const CRUISE_SPEED = 8;    // Player base speed (Natural gravity)
-const YETI_SPEED_MIN = 9;  // Yeti min speed (Faster than cruise)
-const YETI_SPEED_MAX = 12; // Yeti max speed (Slower than player max)
+const YETI_SPEED_MIN = 9;  // Yeti min speed
+const YETI_SPEED_MAX = 12; // Yeti max speed
 
 const TURN_SPEED = 0.2;
-const DRAG = 0.15; // Increased from 0.05 for snappier deceleration
+const DRAG = 0.15;
 const ACCEL = 0.2;
 const YETI_SPAWN_DIST = 2000;
 const JUMP_STRENGTH = 8;
 const GRAVITY = 0.4;
-const NUM_SNOWFLAKES = 100;
+const NUM_SNOWFLAKES = 300;
+
+// Power Up Config
+const POWERUP_DURATION = 180; // 3 seconds at 60fps
+const YETI_SCARE_DURATION = 240; // 4 seconds at 60fps
 
 interface Snowflake {
   x: number;
@@ -29,11 +33,23 @@ interface Snowflake {
   speed: number;
   drift: number;
   opacity: number;
+  swayOffset: number; // For sine wave motion
+  swaySpeed: number;
+}
+
+// Visual-only ground elements for speed sensation
+interface GroundFeature {
+  id: number;
+  x: number;
+  y: number;
+  size: number;
+  variant: 'BUMP' | 'MOUND' | 'ICE';
+  opacity: number;
 }
 
 // Extended Yeti Interface for AI State
 interface YetiEntity extends Entity {
-  mode: 'CHASE' | 'PRE_LUNGE' | 'LUNGE';
+  mode: 'CHASE' | 'PRE_LUNGE' | 'LUNGE' | 'RETREAT';
   modeTimer: number;
 }
 
@@ -49,100 +65,228 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
   const requestRef = useRef<number>(0);
   
   // Mutable game state (refs for performance in loop)
-  const playerRef = useRef<Player>({ x: CANVAS_WIDTH / 2, y: 100, speed: 0, direction: 0, state: 'skiing', jumpHeight: 0, jumpVelocity: 0 });
+  const playerRef = useRef<Player>({ x: CANVAS_WIDTH / 2, y: 100, speed: 0, direction: 0, state: 'skiing', jumpHeight: 0, jumpVelocity: 0, powerUpTimer: 0 });
   const entitiesRef = useRef<Entity[]>([]);
+  const groundFeaturesRef = useRef<GroundFeature[]>([]); // New ref for decorative ground items
   const scoreRef = useRef<number>(0);
   const inputRef = useRef<{ [key: string]: boolean }>({});
   const yetiRef = useRef<YetiEntity | null>(null);
   const timeRef = useRef<number>(0);
   const snowflakesRef = useRef<Snowflake[]>([]);
 
-  // --- Asset Drawing Helpers ---
-  const drawPixelRect = (ctx: CanvasRenderingContext2D, x: number, y: number, color: string, w: number, h: number) => {
-    ctx.fillStyle = color;
-    ctx.fillRect(Math.floor(x), Math.floor(y), w, h);
+  // --- Drawing Helpers ---
+  const fillRoundRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) => {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill();
   };
 
-  const drawTree = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
+  // --- High Fidelity Asset Drawers ---
+
+  const drawHighFiTree = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
     // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
     ctx.beginPath();
-    ctx.ellipse(x + 12, y + 26, 10, 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + 12, y + 28, 12, 4, 0, 0, Math.PI * 2);
     ctx.fill();
 
     // Trunk
-    drawPixelRect(ctx, x + 10, y + 20, '#5D4037', 4, 8);
-    // Leaves
-    ctx.fillStyle = '#1B5E20';
-    ctx.beginPath();
-    ctx.moveTo(x + 12, y);
-    ctx.lineTo(x + 24, y + 20);
-    ctx.lineTo(x, y + 20);
-    ctx.fill();
+    ctx.fillStyle = '#4E342E';
+    ctx.fillRect(x + 10, y + 20, 4, 8);
+
+    // Layers of leaves (Bottom to Top)
+    const drawLayer = (offsetY: number, width: number, color: string, shade: string) => {
+        // Main Cone
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(x + 12, y + offsetY - 10);
+        ctx.lineTo(x + 12 + width, y + offsetY + 10);
+        ctx.lineTo(x + 12 - width, y + offsetY + 10);
+        ctx.fill();
+        
+        // Shading (Right side darker for volume)
+        ctx.fillStyle = shade;
+        ctx.beginPath();
+        ctx.moveTo(x + 12, y + offsetY - 10);
+        ctx.lineTo(x + 12 + width, y + offsetY + 10);
+        ctx.lineTo(x + 12, y + offsetY + 10);
+        ctx.fill();
+    };
+
+    // Draw 3 Tiers
+    drawLayer(12, 14, '#2E7D32', '#1B5E20'); // Bottom
+    drawLayer(2, 12, '#388E3C', '#2E7D32');  // Middle
+    drawLayer(-8, 10, '#43A047', '#388E3C'); // Top
   };
 
-  const drawRock = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
+  const drawHighFiRock = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
     // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
     ctx.beginPath();
-    ctx.ellipse(x + 12, y + 15, 10, 3, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + 12, y + 18, 12, 4, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = '#757575';
+    // Main rock body (Irregular shape)
+    ctx.fillStyle = '#78909C';
     ctx.beginPath();
-    ctx.arc(x + 10, y + 10, 8, 0, Math.PI * 2);
+    ctx.moveTo(x + 5, y + 15);
+    ctx.lineTo(x + 10, y + 5);
+    ctx.lineTo(x + 20, y + 8);
+    ctx.lineTo(x + 24, y + 18);
+    ctx.lineTo(x + 18, y + 22);
+    ctx.lineTo(x + 2, y + 20);
+    ctx.closePath();
     ctx.fill();
-    drawPixelRect(ctx, x + 6, y + 6, '#9E9E9E', 4, 4); // Highlight
-  };
 
-  const drawSnowBump = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
-    ctx.fillStyle = '#E1F5FE'; // Very light blue
+    // Highlight (Top/Left plane)
+    ctx.fillStyle = '#B0BEC5';
     ctx.beginPath();
-    ctx.arc(x, y, 3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#B3E5FC'; // Shadow side
-    ctx.beginPath();
-    ctx.arc(x + 1, y + 1, 2, 0, Math.PI * 2);
-    ctx.fill();
-  };
-
-  const drawSnowMound = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
-    // A larger, obstacle-like pile of snow
-    ctx.fillStyle = '#CFD8DC'; // Gray-ish blue for shadow/bulk
-    ctx.beginPath();
-    ctx.arc(x + 10, y + 10, 10, 0, Math.PI, true); // Semi circle
+    ctx.moveTo(x + 5, y + 15);
+    ctx.lineTo(x + 10, y + 5);
+    ctx.lineTo(x + 15, y + 10);
+    ctx.lineTo(x + 8, y + 18);
+    ctx.closePath();
     ctx.fill();
     
-    ctx.fillStyle = '#ECEFF1'; // Lighter top
+    // Deep Shadow (Bottom/Right plane)
+    ctx.fillStyle = '#546E7A';
     ctx.beginPath();
-    ctx.arc(x + 10, y + 8, 8, 0, Math.PI, true);
+    ctx.moveTo(x + 18, y + 22);
+    ctx.lineTo(x + 24, y + 18);
+    ctx.lineTo(x + 20, y + 8);
+    ctx.lineTo(x + 15, y + 12);
+    ctx.closePath();
     ctx.fill();
   };
 
-  const drawBoostPad = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
+  const drawHighFiGroundFeature = (ctx: CanvasRenderingContext2D, f: GroundFeature) => {
+    const { x, y, size, variant, opacity } = f;
+    
+    if (variant === 'ICE') {
+        // Flat shiny patch
+        ctx.fillStyle = `rgba(225, 245, 254, ${opacity})`;
+        ctx.beginPath();
+        // Irregular shape for ice
+        ctx.moveTo(x - size * 2, y);
+        ctx.lineTo(x - size, y - size/2);
+        ctx.lineTo(x + size * 1.5, y);
+        ctx.lineTo(x + size, y + size/2);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Glint
+        ctx.fillStyle = `rgba(255, 255, 255, ${opacity * 0.8})`;
+        ctx.beginPath();
+        ctx.moveTo(x - size, y - size/4);
+        ctx.lineTo(x, y - size/2);
+        ctx.stroke();
+    } else {
+        // Bumps and texture
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, size);
+        grad.addColorStop(0, `rgba(255, 255, 255, ${opacity})`);
+        grad.addColorStop(1, `rgba(207, 216, 220, 0)`);
+        
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Tiny shadow crescent
+        ctx.fillStyle = `rgba(176, 190, 197, ${opacity})`;
+        ctx.beginPath();
+        ctx.arc(x + size * 0.2, y + size * 0.2, size * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+    }
+  };
+
+  const drawHighFiSnowMound = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
+    // A nice soft dome with 3D shading
+    const grad = ctx.createRadialGradient(x + 8, y + 6, 2, x + 10, y + 10, 15);
+    grad.addColorStop(0, '#FFFFFF');
+    grad.addColorStop(1, '#B0BEC5');
+    
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.ellipse(x + 10, y + 10, 12, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+  };
+
+  const drawHighFiBoostPad = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
     // Glowing Effect
-    ctx.shadowBlur = 10;
-    ctx.shadowColor = '#FFD700';
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = '#FF6D00';
     
-    // Draw chevrons
-    ctx.fillStyle = '#FFC107'; // Amber
+    // Draw chevrons with gradient
+    const grad = ctx.createLinearGradient(x, y, x, y + 20);
+    grad.addColorStop(0, '#FFD180');
+    grad.addColorStop(1, '#FF6D00');
+    ctx.fillStyle = grad;
+
     for(let i=0; i<3; i++) {
-        const offset = i * 8;
+        const offset = i * 7;
         ctx.beginPath();
         ctx.moveTo(x, y + offset);
-        ctx.lineTo(x + 10, y + 10 + offset);
+        ctx.lineTo(x + 10, y + 8 + offset);
         ctx.lineTo(x + 20, y + offset);
-        ctx.lineTo(x + 20, y + 5 + offset);
-        ctx.lineTo(x + 10, y + 15 + offset);
-        ctx.lineTo(x, y + 5 + offset);
+        ctx.lineTo(x + 20, y + 4 + offset);
+        ctx.lineTo(x + 10, y + 12 + offset);
+        ctx.lineTo(x, y + 4 + offset);
         ctx.fill();
     }
     
-    // Reset shadow
     ctx.shadowBlur = 0;
   };
 
-  const drawYeti = (ctx: CanvasRenderingContext2D, yeti: YetiEntity, frame: number) => {
+  const drawHighFiSuperMushroom = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
+     // Shadow
+     ctx.fillStyle = 'rgba(0,0,0,0.2)';
+     ctx.beginPath();
+     ctx.ellipse(x + 10, y + 18, 8, 3, 0, 0, Math.PI*2);
+     ctx.fill();
+
+     // Cap Gradient
+     const capGrad = ctx.createRadialGradient(x + 8, y + 5, 2, x + 10, y + 10, 12);
+     capGrad.addColorStop(0, '#FF5252');
+     capGrad.addColorStop(1, '#B71C1C');
+     ctx.fillStyle = capGrad;
+     
+     ctx.beginPath();
+     ctx.arc(x + 10, y + 10, 10, 0, Math.PI, true);
+     ctx.quadraticCurveTo(x + 10, y + 12, x + 20, y + 10); // slightly curved bottom
+     ctx.fill();
+     
+     // Spots
+     ctx.fillStyle = '#FFEBEE';
+     ctx.beginPath();
+     ctx.ellipse(x + 5, y + 7, 2, 3, Math.PI/4, 0, Math.PI*2);
+     ctx.fill();
+     ctx.beginPath();
+     ctx.ellipse(x + 15, y + 7, 2, 3, -Math.PI/4, 0, Math.PI*2);
+     ctx.fill();
+     ctx.beginPath();
+     ctx.ellipse(x + 10, y + 4, 3, 2, 0, 0, Math.PI*2);
+     ctx.fill();
+
+     // Stem
+     ctx.fillStyle = '#FFE0B2';
+     fillRoundRect(ctx, x + 6, y + 10, 8, 8, 2);
+     
+     // Eyes on stem
+     ctx.fillStyle = '#000';
+     ctx.fillRect(x + 8, y + 12, 1, 2);
+     ctx.fillRect(x + 11, y + 12, 1, 2);
+  };
+
+  const drawHighFiYeti = (ctx: CanvasRenderingContext2D, yeti: YetiEntity, frame: number) => {
     const { x, y, mode } = yeti;
 
     // Shadow
@@ -153,132 +297,237 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
 
     const isLunging = mode === 'LUNGE';
     const isPreLunge = mode === 'PRE_LUNGE';
+    const isRetreating = mode === 'RETREAT';
 
-    // Wobble effect (intense if pre-lunge)
-    let wobble = Math.sin(frame * 0.2) * 5;
-    if (isPreLunge) wobble = (Math.random() - 0.5) * 4;
+    let wobble = 0;
+    if (isPreLunge || isRetreating) wobble = (Math.random() - 0.5) * 4;
 
-    ctx.fillStyle = '#F5F5F5'; // Fur
-    ctx.fillRect(x + (isPreLunge ? wobble : 0), y, 40, 50);
+    const bodyColor = isRetreating ? '#E1F5FE' : '#F5F5F5';
+    const shadowColor = isRetreating ? '#B3E5FC' : '#E0E0E0';
+
+    // Metaball-style body construction
     
+    // Legs
+    const legAnim = Math.sin(frame * 0.2) * 10;
+    const lLegX = x + 5 + (mode === 'CHASE' ? legAnim : 0) + wobble;
+    const rLegX = x + 25 - (mode === 'CHASE' ? legAnim : 0) + wobble;
+    
+    // Left Leg
+    ctx.fillStyle = bodyColor;
+    ctx.beginPath(); ctx.ellipse(lLegX, y + 35, 9, 14, 0, 0, Math.PI*2); ctx.fill();
+    // Right Leg
+    ctx.fillStyle = bodyColor;
+    ctx.beginPath(); ctx.ellipse(rLegX, y + 35, 9, 14, 0, 0, Math.PI*2); ctx.fill();
+
+    // Torso (Main Body)
+    ctx.fillStyle = bodyColor;
+    fillRoundRect(ctx, x + wobble, y + 5, 40, 38, 15);
+    
+    // Chest Shadow/Detail
+    ctx.fillStyle = shadowColor;
+    ctx.beginPath();
+    ctx.arc(x + 20 + wobble, y + 25, 12, 0, Math.PI, false);
+    ctx.fill();
+
     // Arms
-    ctx.fillStyle = '#E0E0E0';
-    let armAngle = Math.sin(frame * 0.3) * 20;
-    if (isLunging) armAngle = -30; // Arms back for speed
-    if (isPreLunge) armAngle = Math.sin(frame * 1.5) * 5; // Shaking arms
+    let armAngle = Math.sin(frame * 0.3) * 0.5;
+    if (isLunging) armAngle = -1.5; // Arms up/forward
+    if (isRetreating) armAngle = -2.5; // Arms up in surrender
+    if (isPreLunge) armAngle += Math.sin(frame * 2) * 0.2;
 
-    ctx.fillRect(x - 10 + armAngle, y + 15, 10, 30);
-    ctx.fillRect(x + 40 - armAngle, y + 15, 10, 30);
+    // Left Arm
+    ctx.save();
+    ctx.translate(x + 5 + wobble, y + 15);
+    ctx.rotate(armAngle);
+    ctx.fillStyle = bodyColor;
+    fillRoundRect(ctx, -6, 0, 12, 32, 6);
+    // Claws
+    ctx.fillStyle = '#9E9E9E';
+    ctx.fillRect(-3, 30, 6, 4);
+    ctx.restore();
 
-    // Face
-    ctx.fillStyle = '#BDBDBD';
-    ctx.fillRect(x + 10, y + 5, 20, 15);
-    
+    // Right Arm
+    ctx.save();
+    ctx.translate(x + 35 + wobble, y + 15);
+    ctx.rotate(-armAngle);
+    ctx.fillStyle = bodyColor;
+    fillRoundRect(ctx, -6, 0, 12, 32, 6);
+    // Claws
+    ctx.fillStyle = '#9E9E9E';
+    ctx.fillRect(-3, 30, 6, 4);
+    ctx.restore();
+
+    // Head Bump
+    ctx.fillStyle = bodyColor;
+    ctx.beginPath();
+    ctx.arc(x + 20 + wobble, y + 8, 14, 0, Math.PI * 2); 
+    ctx.fill();
+
+    // Face Mask
+    ctx.fillStyle = '#BDBDBD'; // Grey skin
+    fillRoundRect(ctx, x + 12 + wobble, y + 10, 16, 14, 4);
+
     // Eyes
-    ctx.fillStyle = isLunging ? '#FF0000' : '#D32F2F'; // Bright red if lunging
-    ctx.fillRect(x + 12, y + 8, 4, 4);
-    ctx.fillRect(x + 24, y + 8, 4, 4);
+    ctx.fillStyle = isLunging ? '#D50000' : '#212121';
+    if (isRetreating) {
+        // Scared Eyes
+        ctx.fillStyle = '#FFF';
+        ctx.beginPath(); ctx.arc(x + 15 + wobble, y + 14, 3, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x + 25 + wobble, y + 14, 3, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#000';
+        ctx.beginPath(); ctx.arc(x + 15 + wobble, y + 14, 1, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x + 25 + wobble, y + 14, 1, 0, Math.PI*2); ctx.fill();
+    } else {
+        ctx.fillRect(x + 14 + wobble, y + 13, 3, 3);
+        ctx.fillRect(x + 23 + wobble, y + 13, 3, 3);
+    }
     
     // Mouth
     ctx.fillStyle = '#000';
     if (isLunging) {
-        ctx.fillRect(x + 12, y + 15, 16, 8); // Open wide
+        ctx.beginPath(); ctx.ellipse(x + 20 + wobble, y + 20, 6, 4, 0, 0, Math.PI*2); ctx.fill();
+        // Teeth
+        ctx.fillStyle = '#FFF';
+        ctx.beginPath(); ctx.moveTo(x + 17, y + 17); ctx.lineTo(x + 18, y + 20); ctx.lineTo(x + 19, y + 17); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(x + 21, y + 17); ctx.lineTo(x + 22, y + 20); ctx.lineTo(x + 23, y + 17); ctx.fill();
+    } else if (isRetreating) {
+        ctx.beginPath(); ctx.arc(x + 20 + wobble, y + 21, 2, 0, Math.PI*2); ctx.fill();
     } else {
-        ctx.fillRect(x + 14, y + 15, 12, 4);
+        ctx.fillRect(x + 16 + wobble, y + 20, 8, 2);
     }
-    
-    // Teeth
-    ctx.fillStyle = '#FFF';
-    ctx.fillRect(x + 15, y + 15, 2, 2);
-    ctx.fillRect(x + 23, y + 15, 2, 2);
   };
 
-  const drawSkier = (ctx: CanvasRenderingContext2D, p: Player) => {
-    const { x, y, direction, state, jumpHeight } = p;
+  const drawHighFiSkier = (ctx: CanvasRenderingContext2D, p: Player) => {
+    const { x, y, direction, state, jumpHeight, powerUpTimer } = p;
     
-    if (state === 'eaten') return; // Don't draw if eaten
+    if (state === 'eaten') return;
 
     ctx.save();
     ctx.translate(x, y);
 
-    if (state === 'crashed') {
-      // Draw heap
-      ctx.fillStyle = '#2196F3'; // Clothes
-      ctx.fillRect(-10, -5, 20, 10);
-      ctx.fillStyle = '#FF5722'; // Skis scattered
-      ctx.fillRect(-15, -10, 5, 20);
-      ctx.fillRect(10, 5, 5, 20);
-      ctx.fillStyle = '#FFE0B2'; // Head
-      ctx.fillRect(-5, -15, 10, 10);
-    } else {
-      // Shadow if jumping
-      if (state === 'jumping') {
-        ctx.fillStyle = 'rgba(0,0,0,0.2)';
-        ctx.beginPath();
-        ctx.ellipse(0, 5, 12, 4, 0, 0, Math.PI * 2);
-        ctx.fill();
-        
-        // Apply vertical offset for jump
+    // Power Up Scaling
+    if (powerUpTimer > 0) {
+        // Pulse effect
+        if (powerUpTimer < 60 && Math.floor(timeRef.current / 5) % 2 === 0) {
+             ctx.scale(1, 1);
+        } else {
+             ctx.scale(2, 2);
+        }
+    }
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    if (state === 'jumping') {
         ctx.translate(0, -jumpHeight);
-      } else {
-         // Normal shadow
-         ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.beginPath();
+        ctx.ellipse(0, 5 + jumpHeight, 10, 3, 0, 0, Math.PI * 2); // Shadow on ground
+        ctx.fill();
+    } else if (state === 'crashed') {
+         // No specific shadow for crash pile, it's flat
+    } else {
          ctx.beginPath();
          ctx.ellipse(0, 5, 10, 3, 0, 0, Math.PI * 2);
          ctx.fill();
-      }
+    }
 
-      // Rotation visual based on direction
-      // Direction is roughly -2 to 2. 
-      // Mapping for visual rotation: 0 -> 0deg, 2 -> 45deg
-      const rotation = direction * (Math.PI / 4); 
+    if (state === 'crashed') {
+      // Detailed Crash Pile
+      ctx.fillStyle = '#1565C0'; // Pants
+      ctx.fillRect(-12, -4, 10, 6);
+      ctx.fillStyle = '#1976D2'; // Shirt
+      ctx.fillRect(-8, -10, 10, 8);
+      ctx.fillStyle = '#FF7043'; // Skis scattered
+      ctx.save(); ctx.rotate(0.5); ctx.fillRect(-10, -5, 20, 3); ctx.restore();
+      ctx.save(); ctx.rotate(-0.8); ctx.fillRect(-5, 5, 20, 3); ctx.restore();
+      // Head face down
+      ctx.fillStyle = '#FFCCBC';
+      ctx.beginPath(); ctx.arc(5, -5, 5, 0, Math.PI*2); ctx.fill();
+      // Stars
+      ctx.fillStyle = '#FFEB3B';
+      const starX = Math.sin(timeRef.current * 0.2) * 10;
+      ctx.fillRect(-5 + starX, -25, 4, 4);
+
+    } else {
+      // Rotation
+      const rotation = direction * (Math.PI / 6); 
+      ctx.rotate(rotation);
       
       // Skis
-      ctx.rotate(rotation);
-      ctx.fillStyle = '#FF5722';
-      
+      ctx.fillStyle = '#D84315'; // Deep Orange
       if (state === 'jumping') {
-         // Crossed skis for jump
-         ctx.save();
-         ctx.rotate(Math.PI / 8);
-         ctx.fillRect(-8, 5, 4, 30);
-         ctx.restore();
-         ctx.save();
-         ctx.rotate(-Math.PI / 8);
-         ctx.fillRect(4, 5, 4, 30);
-         ctx.restore();
+         ctx.save(); ctx.rotate(Math.PI / 8); fillRoundRect(ctx, -6, 5, 4, 28, 2); ctx.restore();
+         ctx.save(); ctx.rotate(-Math.PI / 8); fillRoundRect(ctx, 2, 5, 4, 28, 2); ctx.restore();
       } else {
-         ctx.fillRect(-8, 10, 4, 25); // Left ski
-         ctx.fillRect(4, 10, 4, 25);  // Right ski
+         // Left Ski
+         fillRoundRect(ctx, -8, 5, 4, 28, 2);
+         // Right Ski
+         fillRoundRect(ctx, 4, 5, 4, 28, 2);
+         // Ski Highlights
+         ctx.fillStyle = '#FF7043';
+         ctx.fillRect(-7, 5, 2, 26);
+         ctx.fillRect(5, 5, 2, 26);
       }
 
-      // Body
-      ctx.fillStyle = '#1976D2'; // Pants
-      ctx.fillRect(-6, 0, 12, 12);
-      ctx.fillStyle = '#2196F3'; // Shirt
-      ctx.fillRect(-7, -12, 14, 14);
+      // Legs (Pants)
+      ctx.fillStyle = '#1565C0'; // Dark Blue
+      ctx.beginPath();
+      // Draw bent legs for skiing posture
+      ctx.moveTo(-6, 0);
+      ctx.lineTo(-6, 12); 
+      ctx.lineTo(-2, 12);
+      ctx.lineTo(0, 5); // Crotch
+      ctx.lineTo(2, 12);
+      ctx.lineTo(6, 12);
+      ctx.lineTo(6, 0);
+      ctx.fill();
+
+      // Torso
+      ctx.fillStyle = '#1976D2'; // Blue
+      fillRoundRect(ctx, -7, -11, 14, 12, 3);
+      
+      // Arms (Dynamic poles)
+      ctx.strokeStyle = '#1565C0';
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-7, -8); ctx.lineTo(-11, 0); // Left arm
+      ctx.moveTo(7, -8); ctx.lineTo(11, 0);   // Right arm
+      ctx.stroke();
+      
+      // Poles
+      ctx.fillStyle = '#90A4AE';
+      ctx.fillRect(-13, -5, 2, 24); 
+      ctx.fillRect(13, -5, 2, 24);
 
       // Head
-      ctx.fillStyle = '#FFE0B2';
-      ctx.fillRect(-5, -20, 10, 10);
+      ctx.fillStyle = '#FFCCBC';
+      ctx.beginPath();
+      ctx.arc(0, -15, 5, 0, Math.PI * 2);
+      ctx.fill();
       
       // Hat
       ctx.fillStyle = '#D32F2F';
       ctx.beginPath();
-      ctx.moveTo(-6, -20);
-      ctx.lineTo(6, -20);
-      ctx.lineTo(0, -28);
+      ctx.moveTo(-6, -16);
+      ctx.quadraticCurveTo(0, -24, 6, -16);
+      ctx.lineTo(6, -15);
+      ctx.lineTo(-6, -15);
       ctx.fill();
+      // Pom pom
+      ctx.fillStyle = '#FFFFFF';
+      ctx.beginPath(); ctx.arc(0, -22, 2, 0, Math.PI*2); ctx.fill();
       
-      // Scarf flowing if moving fast or jumping
+      // Scarf Physics
       if (p.speed > 5 || state === 'jumping') {
-         // If moving extremely fast (boosted), make scarf toggle colors
-         ctx.strokeStyle = (p.speed > MAX_SPEED + 2 && timeRef.current % 4 < 2) ? '#FFC107' : '#FFEB3B';
-         ctx.lineWidth = 3;
+         ctx.fillStyle = (p.speed > MAX_SPEED + 2 && timeRef.current % 4 < 2) ? '#FFEB3B' : '#FDD835'; // Flash if super fast
          ctx.beginPath();
-         ctx.moveTo(2, -15);
-         ctx.lineTo(10 + Math.sin(timeRef.current * 0.5) * 5, -18);
-         ctx.stroke();
+         ctx.moveTo(2, -13);
+         const sway = Math.sin(timeRef.current * 0.2) * 5;
+         const length = 10 + (p.speed * 1.5);
+         ctx.lineTo(length + Math.abs(sway), -13 + sway);
+         ctx.lineTo(length + Math.abs(sway) - 2, -9 + sway);
+         ctx.lineTo(2, -9);
+         ctx.fill();
       }
     }
     ctx.restore();
@@ -286,58 +535,82 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
 
   // --- Logic Helpers ---
   const spawnEntities = (startY: number, endY: number) => {
-    // Simple procedural generation
+    const playerX = playerRef.current.x;
+    
+    // Spawn Gameplay Entities
     for (let y = startY; y < endY; y += 30) {
-      
-      // Dynamic Difficulty: Increase obstacle density every 2000m
       const difficultyTier = Math.floor(y / 2000);
       const baseChance = 0.15;
-      // Cap additional difficulty so it doesn't become impossible (max +50%)
       const addedChance = Math.min(difficultyTier * 0.08, 0.5); 
       const obstacleChance = baseChance + addedChance;
 
-      // Chance for obstacles
+      const spawnX = () => playerX + (Math.random() * CANVAS_WIDTH * 3) - (CANVAS_WIDTH * 1.5);
+
       if (Math.random() < obstacleChance) { 
         const typeRoll = Math.random();
         let type = EntityType.TREE;
         if (typeRoll > 0.7) type = EntityType.ROCK;
         else if (typeRoll > 0.9) type = EntityType.STUMP;
-        // 10% chance for a snow mound within the obstacle pool (actually makes it fairly common)
         else if (typeRoll > 0.6 && typeRoll <= 0.7) type = EntityType.SNOW_MOUND;
 
         entitiesRef.current.push({
           id: Math.random(),
           type,
-          x: Math.random() * CANVAS_WIDTH * 3 - CANVAS_WIDTH, // Wide spawn area
+          x: spawnX(),
           y: y + Math.random() * 50,
-          width: 24, // Approx width
+          width: 24, 
           height: 24
         });
       }
 
-      // Chance for Snow Bumps (Ground Texture)
-      if (Math.random() < 0.4) {
-        entitiesRef.current.push({
-            id: Math.random(),
-            type: EntityType.SNOW_BUMP,
-            x: Math.random() * CANVAS_WIDTH * 3 - CANVAS_WIDTH,
-            y: y + Math.random() * 50,
-            width: 5, 
-            height: 5
-        });
-      }
-
-      // Chance for Boost Pads (Rare)
       if (Math.random() < 0.03) {
         entitiesRef.current.push({
             id: Math.random(),
             type: EntityType.BOOST_PAD,
-            x: Math.random() * CANVAS_WIDTH * 3 - CANVAS_WIDTH,
+            x: spawnX(),
             y: y + Math.random() * 50,
             width: 20, 
             height: 30
         });
       }
+
+      if (Math.random() < 0.01) { 
+        entitiesRef.current.push({
+            id: Math.random(),
+            type: EntityType.SUPER_MUSHROOM,
+            x: spawnX(),
+            y: y + Math.random() * 50,
+            width: 20,
+            height: 20
+        });
+      }
+    }
+
+    // Spawn Cosmetic Ground Features
+    for (let y = startY; y < endY; y += 15) { 
+       for (let i = 0; i < 3; i++) {
+           if (Math.random() < 0.7) {
+               const variantRoll = Math.random();
+               let variant: 'BUMP' | 'MOUND' | 'ICE' = 'BUMP';
+               let size = Math.random() * 2 + 2;
+               if (variantRoll > 0.8) {
+                   variant = 'ICE';
+                   size = Math.random() * 4 + 3;
+               } else if (variantRoll > 0.6) {
+                   variant = 'MOUND';
+                   size = Math.random() * 3 + 3;
+               }
+
+               groundFeaturesRef.current.push({
+                   id: Math.random(),
+                   x: playerX + (Math.random() * CANVAS_WIDTH * 3) - (CANVAS_WIDTH * 1.5),
+                   y: y + Math.random() * 20,
+                   size,
+                   variant,
+                   opacity: Math.random() * 0.5 + 0.3
+               });
+           }
+       }
     }
   };
 
@@ -350,24 +623,20 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
             radius: Math.random() * 2 + 1,
             speed: Math.random() * 2 + 1,
             drift: Math.random() * 0.5 - 0.25,
-            opacity: Math.random() * 0.5 + 0.3
+            opacity: Math.random() * 0.5 + 0.3,
+            swayOffset: Math.random() * Math.PI * 2,
+            swaySpeed: Math.random() * 0.05 + 0.01
         });
     }
   };
 
   const updateSnowflakes = (playerSpeed: number, playerDir: number) => {
-    const snowSpeedY = playerSpeed > 0 ? -playerSpeed : 1; // Snow moves UP if player skis DOWN fast
-    const snowSpeedX = -playerDir * 5; // Snow moves opposite to turn
-
+    const wind = Math.sin(timeRef.current * 0.005) * 2;
     snowflakesRef.current.forEach(flake => {
-        // Apply player velocity relative to snow
-        // Natural fall speed + Player movement effect
-        flake.y += (flake.speed + 2) - playerSpeed * 1.5; 
-        flake.x += flake.drift - (playerDir * 2);
-
-        // Wrap around
+        flake.x += flake.drift + wind - (playerDir * 5) + Math.sin(timeRef.current * flake.swaySpeed + flake.swayOffset) * 0.5;
+        flake.y += (flake.speed + 1) - playerSpeed * 1.5;
         if (flake.y > CANVAS_HEIGHT) flake.y = 0;
-        if (flake.y < 0) flake.y = CANVAS_HEIGHT;
+        if (flake.y < -10) flake.y = CANVAS_HEIGHT; 
         if (flake.x > CANVAS_WIDTH) flake.x = 0;
         if (flake.x < 0) flake.x = CANVAS_WIDTH;
     });
@@ -385,10 +654,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
   };
 
   const checkCollision = (p: Player, e: Entity) => {
-    // Ignore cosmetic entities
     if (e.type === EntityType.SNOW_BUMP) return false;
 
-    // If jumping, ignore low obstacles (including Snow Mounds), but still hit boost pads
     if (p.state === 'jumping') {
         if (e.type === EntityType.ROCK || 
             e.type === EntityType.STUMP || 
@@ -398,16 +665,21 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
         }
     }
 
-    // Simple AABB, slightly forgiving
+    if (p.powerUpTimer > 0) {
+        if (e.type === EntityType.TREE || e.type === EntityType.ROCK || e.type === EntityType.STUMP) {
+            return false; 
+        }
+    }
+
     const playerRect = { x: p.x - 8, y: p.y - 15, w: 16, h: 30 };
+    if (p.powerUpTimer > 0) {
+        playerRect.x -= 8; playerRect.y -= 15; playerRect.w *= 2; playerRect.h *= 2;
+    }
+
     const entityRect = { x: e.x, y: e.y, w: e.width, h: e.height };
 
     if (e.type === EntityType.TREE) {
-      // Trees have a smaller hit box at the bottom (trunk)
-      entityRect.y += 15; 
-      entityRect.h = 10;
-      entityRect.x += 8;
-      entityRect.w = 8;
+      entityRect.y += 15; entityRect.h = 10; entityRect.x += 8; entityRect.w = 8;
     }
 
     return (
@@ -419,15 +691,14 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
   };
 
   const resetGame = () => {
-    playerRef.current = { x: CANVAS_WIDTH / 2, y: 100, speed: 0, direction: 0, state: 'skiing', jumpHeight: 0, jumpVelocity: 0 };
+    playerRef.current = { x: CANVAS_WIDTH / 2, y: 100, speed: 0, direction: 0, state: 'skiing', jumpHeight: 0, jumpVelocity: 0, powerUpTimer: 0 };
     entitiesRef.current = [];
+    groundFeaturesRef.current = [];
     scoreRef.current = 0;
     yetiRef.current = null;
     spawnEntities(200, 1000);
     initSnowflakes();
     setScore(0);
-    
-    // Call AI for start message
     generateGameCommentary('start', {}).then(onCommentary);
   };
 
@@ -444,36 +715,28 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
       }
       if (inputRef.current['ArrowRight']) {
         player.direction = Math.max(Math.min(player.direction + TURN_SPEED, 2), -2);
-        if (player.direction > 2) player.direction = 2; // clamp
+        if (player.direction > 2) player.direction = 2; 
       }
       
-      // Speed Control:
-      // Pressing Down boosts towards MAX_SPEED
-      // Not pressing Down accelerates naturally only towards CRUISE_SPEED
       if (inputRef.current['ArrowDown']) {
         player.speed = Math.min(player.speed + ACCEL, MAX_SPEED);
       } else {
-        // Natural friction/acceleration
         const slopeFactor = 1 - (Math.abs(player.direction) / 2.5);
         const targetSpeed = CRUISE_SPEED * slopeFactor;
         
         if (player.speed > targetSpeed) {
-            // Apply linear drag for responsiveness
             player.speed = Math.max(targetSpeed, player.speed - DRAG);
         } else {
-            player.speed += 0.05 * slopeFactor; // Gravity accelerates to Cruise
+            player.speed += 0.05 * slopeFactor; 
         }
       }
 
-      // ArrowUp triggers jump if skiing
       if (inputRef.current['ArrowUp'] && player.state === 'skiing') {
         player.state = 'jumping';
         player.jumpVelocity = JUMP_STRENGTH;
-        // Boost speed slightly on jump
         player.speed = Math.min(player.speed + 1, MAX_SPEED);
       }
       
-      // Safety cap (low end)
       if (player.speed < 0) player.speed = 0;
     }
 
@@ -483,26 +746,26 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
       player.x += Math.sin(dirRad) * player.speed;
       player.y += Math.cos(dirRad) * player.speed;
 
-      // Jump Physics
       if (player.state === 'jumping') {
         player.jumpHeight += player.jumpVelocity;
         player.jumpVelocity -= GRAVITY;
-
-        // Landing
         if (player.jumpHeight <= 0) {
             player.jumpHeight = 0;
             player.jumpVelocity = 0;
             player.state = 'skiing';
         }
       }
+      
+      if (player.powerUpTimer > 0) player.powerUpTimer--;
     }
 
     // 3. Entity Management
-    // Cull old entities
-    entitiesRef.current = entitiesRef.current.filter(e => e.y > player.y - CANVAS_HEIGHT / 2);
-    
-    // Spawn new ones ahead
     const bottomEdge = player.y + CANVAS_HEIGHT;
+    const topEdge = player.y - CANVAS_HEIGHT / 2;
+
+    entitiesRef.current = entitiesRef.current.filter(e => e.y > topEdge);
+    groundFeaturesRef.current = groundFeaturesRef.current.filter(e => e.y > topEdge);
+    
     const lastEntityY = entitiesRef.current.length > 0 ? entitiesRef.current[entitiesRef.current.length - 1].y : 0;
     if (lastEntityY < bottomEdge + 500) {
       spawnEntities(Math.max(lastEntityY, bottomEdge), bottomEdge + 500);
@@ -514,7 +777,7 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
         id: -1,
         type: EntityType.YETI,
         x: player.x - 300, 
-        y: player.y - 400, // Spawn further back so lunge isn't instant death
+        y: player.y - 400,
         width: 40,
         height: 50,
         mode: 'CHASE',
@@ -529,56 +792,57 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
       const dy = player.y - yeti.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
-      if (dist < 10 && player.state !== 'eaten') {
+      if (player.powerUpTimer > 0 && yeti.mode !== 'RETREAT') {
+          yeti.mode = 'RETREAT';
+          yeti.modeTimer = YETI_SCARE_DURATION;
+          onCommentary("The Yeti is scared of your size!");
+      }
+
+      if (dist < 10 && player.state !== 'eaten' && player.powerUpTimer <= 0) {
         player.state = 'eaten';
         player.speed = 0;
         setGameState(GameState.EATEN);
         generateGameCommentary('eaten', { distance: player.y }).then(onCommentary);
       } else if (player.state !== 'eaten') {
-        // --- Yeti AI State Machine ---
         if (yeti.modeTimer > 0) yeti.modeTimer--;
 
         if (yeti.modeTimer <= 0) {
             if (yeti.mode === 'CHASE') {
-                // Occasional lunge attack (5% chance per check if cooldown done)
                 if (Math.random() < 0.02) { 
                     yeti.mode = 'PRE_LUNGE';
-                    yeti.modeTimer = 30; // 0.5s warning (stops/shakes)
+                    yeti.modeTimer = 30; 
                 }
             } else if (yeti.mode === 'PRE_LUNGE') {
                 yeti.mode = 'LUNGE';
-                yeti.modeTimer = 60; // 1s dash
+                yeti.modeTimer = 60; 
             } else if (yeti.mode === 'LUNGE') {
                 yeti.mode = 'CHASE';
-                yeti.modeTimer = 120; // 2s Cooldown before next possible lunge
+                yeti.modeTimer = 120;
+            } else if (yeti.mode === 'RETREAT') {
+                yeti.mode = 'CHASE';
             }
         }
 
-        // Difficulty Scaling: Increase Yeti speed by 5% every 2000m
-        const difficultyMultiplier = 1 + Math.floor(player.y / 2000) * 0.05;
-
-        // Calculate Target Speed & Movement
+        const difficultyMultiplier = 1 + Math.floor(player.y / 3000) * 0.03;
         let targetSpeed = 0;
 
         if (yeti.mode === 'CHASE') {
             const urgency = Math.min(dist / 400, 1); 
-            // Scale chase speed by difficulty
             targetSpeed = (YETI_SPEED_MIN + (YETI_SPEED_MAX - YETI_SPEED_MIN) * urgency) * difficultyMultiplier;
-            
-            // "Swerve" Behavior: Add sine wave noise to make movement less robotic
             yeti.x += Math.sin(timeRef.current * 0.05) * 2; 
 
         } else if (yeti.mode === 'PRE_LUNGE') {
-            targetSpeed = YETI_SPEED_MIN * 0.2; // Nearly stop to telegraph attack
-            // Shake effect
+            targetSpeed = YETI_SPEED_MIN * 0.2; 
             yeti.x += (Math.random() - 0.5) * 6;
         } else if (yeti.mode === 'LUNGE') {
-            // Scale lunge speed by difficulty
             targetSpeed = (MAX_SPEED * 1.5) * difficultyMultiplier;
+        } else if (yeti.mode === 'RETREAT') {
+            targetSpeed = -4; 
         }
 
-        // Apply movement vector
-        if (dist > 10) {
+        if (yeti.mode === 'RETREAT') {
+            yeti.y += targetSpeed;
+        } else if (dist > 10) {
             yeti.x += (dx / dist) * targetSpeed;
             yeti.y += (dy / dist) * targetSpeed;
         }
@@ -589,31 +853,31 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
     if (player.state === 'skiing' || player.state === 'jumping') {
       let collidedWithPad = false;
 
-      // Filter out consumed items immediately
       entitiesRef.current = entitiesRef.current.filter(e => {
         if (checkCollision(player, e)) {
             if (e.type === EntityType.BOOST_PAD) {
-                // Speed boost!
                 player.speed = Math.min(player.speed + 8, ABSOLUTE_MAX_SPEED);
                 collidedWithPad = true;
-                return false; // Remove pad
+                return false; 
+            }
+            if (e.type === EntityType.SUPER_MUSHROOM) {
+                player.powerUpTimer = POWERUP_DURATION;
+                return false; 
             }
             if (e.type === EntityType.SNOW_MOUND) {
-                // Slow down
+                if (player.powerUpTimer > 0) return false; 
                 player.speed *= 0.75;
-                // Remove mound so we don't hit it again in next frame
                 return false;
             }
             
-            // Fatal collision
-            if (!collidedWithPad) {
+            if (!collidedWithPad && player.powerUpTimer <= 0) {
                 player.state = 'crashed';
                 player.speed = 0;
-                player.jumpHeight = 0; // Reset height on crash
+                player.jumpHeight = 0; 
                 setGameState(GameState.CRASHED);
                 generateGameCommentary('crash', { distance: player.y, cause: e.type.toLowerCase() }).then(onCommentary);
             }
-            return true; // Keep entity if we crashed into it
+            return true;
         }
         return true;
       });
@@ -626,7 +890,6 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
     scoreRef.current = Math.floor(player.y);
     setScore(scoreRef.current);
 
-    // Animation Frames
     timeRef.current++;
 
   }, [gameState, setGameState, setScore, onCommentary]);
@@ -638,50 +901,50 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Clear background with nice gradient
+    // Gradient Background
     const gradient = ctx.createLinearGradient(0, 0, 0, CANVAS_HEIGHT);
-    gradient.addColorStop(0, '#E3F2FD'); // Light Blue Top
-    gradient.addColorStop(1, '#FAFAFA'); // White Bottom
+    gradient.addColorStop(0, '#E1F5FE'); 
+    gradient.addColorStop(1, '#FAFAFA'); 
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
     const player = playerRef.current;
 
-    // Camera follow player
+    // Camera
     ctx.save();
-    // Center player on screen X and Y (offset by slight 'up' bias for Y)
     ctx.translate(-player.x + CANVAS_WIDTH / 2, -player.y + CANVAS_HEIGHT / 3);
+
+    // Draw Ground Features
+    groundFeaturesRef.current.forEach(f => {
+        if (f.y < player.y - CANVAS_HEIGHT || f.y > player.y + CANVAS_HEIGHT) return;
+        drawHighFiGroundFeature(ctx, f);
+    });
 
     // Draw Entities
     entitiesRef.current.forEach(e => {
-      // Viewport culling for render
       if (e.y < player.y - CANVAS_HEIGHT || e.y > player.y + CANVAS_HEIGHT) return;
 
       switch (e.type) {
-        case EntityType.TREE: drawTree(ctx, e.x, e.y); break;
-        case EntityType.ROCK: drawRock(ctx, e.x, e.y); break;
-        case EntityType.STUMP: drawRock(ctx, e.x, e.y); break; // Reuse rock logic
-        case EntityType.SNOW_BUMP: drawSnowBump(ctx, e.x, e.y); break;
-        case EntityType.SNOW_MOUND: drawSnowMound(ctx, e.x, e.y); break;
-        case EntityType.BOOST_PAD: drawBoostPad(ctx, e.x, e.y); break;
-        default: drawPixelRect(ctx, e.x, e.y, 'purple', e.width, e.height);
+        case EntityType.TREE: drawHighFiTree(ctx, e.x, e.y); break;
+        case EntityType.ROCK: drawHighFiRock(ctx, e.x, e.y); break;
+        case EntityType.STUMP: drawHighFiRock(ctx, e.x, e.y); break;
+        case EntityType.SNOW_BUMP: drawHighFiGroundFeature(ctx, {id:0, x: e.x, y:e.y, size: 3, variant: 'BUMP', opacity: 1}); break;
+        case EntityType.SNOW_MOUND: drawHighFiSnowMound(ctx, e.x, e.y); break;
+        case EntityType.BOOST_PAD: drawHighFiBoostPad(ctx, e.x, e.y); break;
+        case EntityType.SUPER_MUSHROOM: drawHighFiSuperMushroom(ctx, e.x, e.y); break;
+        default: ctx.fillStyle='purple'; ctx.fillRect(e.x, e.y, e.width, e.height);
       }
     });
 
-    // Draw Player
-    drawSkier(ctx, player);
+    drawHighFiSkier(ctx, player);
 
-    // Draw Yeti (if active)
     if (yetiRef.current) {
-      drawYeti(ctx, yetiRef.current, timeRef.current);
+      drawHighFiYeti(ctx, yetiRef.current, timeRef.current);
     }
 
     ctx.restore();
-
-    // Draw Snow Overlay (Fixed to screen)
     drawSnowflakes(ctx);
 
-    // Loop
     requestRef.current = requestAnimationFrame(() => {
       update();
       render();
@@ -696,7 +959,6 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
 
-    // Initial Start
     if (gameState === GameState.PLAYING && scoreRef.current === 0) {
       resetGame();
     } else if (snowflakesRef.current.length === 0) {
@@ -712,22 +974,11 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
     };
   }, [gameState, render]);
 
-  // Handle Game Over / Restart triggers from parent
   useEffect(() => {
-    if (gameState === GameState.MENU) {
-       // Reset logic if needed when going back to menu
-    }
-  }, [gameState]);
-
-  // Allow parent to trigger restart
-  useEffect(() => {
-    // If user clicks "Try Again" in parent, we might pass a prop or expose a ref,
-    // but here we just check if state flips to playing from a stopped state
     if (gameState === GameState.PLAYING && (playerRef.current.state === 'crashed' || playerRef.current.state === 'eaten')) {
         resetGame();
     }
   }, [gameState]);
-
 
   return (
     <canvas

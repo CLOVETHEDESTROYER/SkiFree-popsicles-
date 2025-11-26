@@ -16,6 +16,7 @@ export enum EntityType {
   SNOW_BUMP = 'SNOW_BUMP', // Decorative ground texture
   SNOW_MOUND = 'SNOW_MOUND', // Obstacle that slows you down
   BOOST_PAD = 'BOOST_PAD', // Speed boost
+  SUPER_MUSHROOM = 'SUPER_MUSHROOM', // Power up
 }
 
 export interface Point {
@@ -41,4 +42,5 @@ export interface Player {
   state: 'skiing' | 'crashed' | 'jumping' | 'eaten';
   jumpHeight: number;
   jumpVelocity: number;
+  powerUpTimer: number; // Frames remaining for power-up
 }

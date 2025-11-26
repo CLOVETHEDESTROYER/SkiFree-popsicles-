@@ -57,14 +57,20 @@ export const generateGameCommentary = async (
 
     return response.text?.trim() || getFallbackCommentary(event, details.cause);
   } catch (error: any) {
-    const errorMessage = error.message || JSON.stringify(error);
+    const errorMessage = (error.message || JSON.stringify(error)).toLowerCase();
     
     // Gracefully handle 429 (Resource Exhausted) and Quota limits
-    if (errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('RESOURCE_EXHAUSTED')) {
+    if (errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('resource_exhausted')) {
         console.warn("Gemini API Quota Exceeded. Switching to offline commentary for 60 seconds.");
         isRateLimited = true;
         setTimeout(() => isRateLimited = false, 60000); // Cooldown for 1 minute
         return getFallbackCommentary(event, details.cause);
+    }
+    
+    // Gracefully handle 500s or Network/XHR errors which happen with blockers or server issues
+    if (errorMessage.includes('500') || errorMessage.includes('xhr') || errorMessage.includes('fetch')) {
+         console.warn("Gemini API Temporary Error. Using fallback.");
+         return getFallbackCommentary(event, details.cause);
     }
     
     console.error("Gemini API Error:", error);
