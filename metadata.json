@@ -1,0 +1,5 @@
+{
+  "name": "SkiFree React",
+  "description": "A faithful recreation of the classic Windows game SkiFree using React and HTML5 Canvas, featuring the relentless Yeti and AI-powered commentary.",
+  "requestFramePermissions": []
+}
