@@ -17,6 +17,8 @@ export enum EntityType {
   SNOW_MOUND = 'SNOW_MOUND', // Obstacle that slows you down
   BOOST_PAD = 'BOOST_PAD', // Speed boost
   SUPER_MUSHROOM = 'SUPER_MUSHROOM', // Power up
+  COFFEE = 'COFFEE', // Ammo pickup (was SNOWBALL_PILE)
+  COFFEE_CUP = 'COFFEE_CUP', // Projectile (was SNOWBALL)
 }
 
 export interface Point {
@@ -32,6 +34,8 @@ export interface Entity {
   width: number;
   height: number;
   frame?: number; // For animation
+  vx?: number; // Velocity X for moving entities
+  vy?: number; // Velocity Y for moving entities
 }
 
 export interface Player {
@@ -43,4 +47,10 @@ export interface Player {
   jumpHeight: number;
   jumpVelocity: number;
   powerUpTimer: number; // Frames remaining for power-up
+  coffee: number; // Ammo count
+}
+
+export interface HighScore {
+  name: string;
+  score: number;
 }

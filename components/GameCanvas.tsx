@@ -5,26 +5,37 @@ import { generateGameCommentary } from '../services/geminiService';
 // --- Constants ---
 const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 600;
-const FPS = 60;
 
-// Speed Balancing
-const MAX_SPEED = 12.5;    // Player max speed
-const ABSOLUTE_MAX_SPEED = 22; // Hard cap for boost pads
-const CRUISE_SPEED = 8;    // Player base speed (Natural gravity)
-const YETI_SPEED_MIN = 9;  // Yeti min speed
-const YETI_SPEED_MAX = 12; // Yeti max speed
+// Speed Balancing - Scale 100 maps to 25px/frame
+const SPEED_SCALE = 0.25; 
 
+// Speed Limits (Scaled)
+const GLOBAL_SPEED_LIMIT = 100 * SPEED_SCALE; // 25px/frame (Absolute Max)
+
+// Player Stats
+const PLAYER_BOOST_SPEED = 95 * SPEED_SCALE;  // 23.75 (Boost Speed)
+const PLAYER_NORMAL_MAX = 80 * SPEED_SCALE;   // 20.00 (Normal Top Speed)
+const PLAYER_CRUISE_SPEED = 40 * SPEED_SCALE; // 10.00 (No input cruising)
+const PLAYER_ACCEL = 0.25;                    // Snappy acceleration
 const TURN_SPEED = 0.2;
-const DRAG = 0.15;
-const ACCEL = 0.2;
-const YETI_SPAWN_DIST = 2000;
+const DRAG = 0.1;
 const JUMP_STRENGTH = 8;
 const GRAVITY = 0.4;
+
+// Yeti Stats
+const YETI_BASE_SPEED = 60 * SPEED_SCALE;    // 15.00
+const YETI_TOP_SPEED = 85 * SPEED_SCALE;     // 21.25 (Faster than player normal)
+const YETI_ACCEL_FACTOR = 0.12;              // Slower accel than player (0.12 vs 0.25)
+
+// Other
+const PROJECTILE_SPEED = 30; // Must be faster than global limit
+const YETI_MIN_SPAWN_DIST = 2500;
 const NUM_SNOWFLAKES = 300;
 
 // Power Up Config
 const POWERUP_DURATION = 180; // 3 seconds at 60fps
 const YETI_SCARE_DURATION = 240; // 4 seconds at 60fps
+const COFFEE_PER_PICKUP = 1;
 
 interface Snowflake {
   x: number;
@@ -51,6 +62,7 @@ interface GroundFeature {
 interface YetiEntity extends Entity {
   mode: 'CHASE' | 'PRE_LUNGE' | 'LUNGE' | 'RETREAT';
   modeTimer: number;
+  currentSpeed: number; // To track acceleration
 }
 
 interface GameCanvasProps {
@@ -65,11 +77,13 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
   const requestRef = useRef<number>(0);
   
   // Mutable game state (refs for performance in loop)
-  const playerRef = useRef<Player>({ x: CANVAS_WIDTH / 2, y: 100, speed: 0, direction: 0, state: 'skiing', jumpHeight: 0, jumpVelocity: 0, powerUpTimer: 0 });
+  const playerRef = useRef<Player>({ x: CANVAS_WIDTH / 2, y: 100, speed: 0, direction: 0, state: 'skiing', jumpHeight: 0, jumpVelocity: 0, powerUpTimer: 0, coffee: 0 });
   const entitiesRef = useRef<Entity[]>([]);
+  const projectilesRef = useRef<Entity[]>([]); // New ref for coffee cups being thrown
   const groundFeaturesRef = useRef<GroundFeature[]>([]); // New ref for decorative ground items
   const scoreRef = useRef<number>(0);
   const inputRef = useRef<{ [key: string]: boolean }>({});
+  const lastFireTimeRef = useRef<number>(0); // Debounce firing
   const yetiRef = useRef<YetiEntity | null>(null);
   const timeRef = useRef<number>(0);
   const snowflakesRef = useRef<Snowflake[]>([]);
@@ -246,6 +260,67 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
     ctx.shadowBlur = 0;
   };
 
+  const drawCoffeePickup = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
+      // Draw a paper coffee cup
+      ctx.shadowBlur = 5;
+      ctx.shadowColor = '#FFF';
+
+      // Cup Body (White)
+      ctx.fillStyle = '#FFF';
+      ctx.beginPath();
+      ctx.moveTo(x + 6, y + 18);
+      ctx.lineTo(x + 4, y + 6);
+      ctx.lineTo(x + 16, y + 6);
+      ctx.lineTo(x + 14, y + 18);
+      ctx.closePath();
+      ctx.fill();
+
+      // Sleeve (Brown)
+      ctx.fillStyle = '#8D6E63';
+      ctx.fillRect(x + 5, y + 9, 10, 5);
+
+      // Lid (White)
+      ctx.fillStyle = '#EEEEEE';
+      ctx.fillRect(x + 3, y + 4, 14, 2);
+
+      // Steam
+      ctx.strokeStyle = '#E0E0E0';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x + 6, y + 2); ctx.quadraticCurveTo(x + 8, y - 2, x + 6, y - 4);
+      ctx.moveTo(x + 10, y + 2); ctx.quadraticCurveTo(x + 12, y - 2, x + 10, y - 4);
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+  };
+
+  const drawCoffeeProjectile = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
+      // Spinning coffee cup projectile
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(timeRef.current * 0.2); // Spin animation
+
+      // Cup
+      ctx.fillStyle = '#FFF';
+      ctx.beginPath();
+      ctx.moveTo(-3, 6);
+      ctx.lineTo(-4, -6);
+      ctx.lineTo(4, -6);
+      ctx.lineTo(3, 6);
+      ctx.closePath();
+      ctx.fill();
+
+      // Sleeve
+      ctx.fillStyle = '#795548';
+      ctx.fillRect(-3.5, -2, 7, 4);
+      
+      // Lid
+      ctx.fillStyle = '#EEE';
+      ctx.fillRect(-5, -7, 10, 2);
+
+      ctx.restore();
+  };
+
   const drawHighFiSuperMushroom = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
      // Shadow
      ctx.fillStyle = 'rgba(0,0,0,0.2)';
@@ -307,10 +382,13 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
 
     // Metaball-style body construction
     
-    // Legs
-    const legAnim = Math.sin(frame * 0.2) * 10;
-    const lLegX = x + 5 + (mode === 'CHASE' ? legAnim : 0) + wobble;
-    const rLegX = x + 25 - (mode === 'CHASE' ? legAnim : 0) + wobble;
+    // Legs - Hurried gait when retreating
+    const legFreq = isRetreating ? 0.6 : 0.2;
+    const legAnim = Math.sin(frame * legFreq) * 10;
+    const shouldMoveLegs = mode === 'CHASE' || isRetreating;
+
+    const lLegX = x + 5 + (shouldMoveLegs ? legAnim : 0) + wobble;
+    const rLegX = x + 25 - (shouldMoveLegs ? legAnim : 0) + wobble;
     
     // Left Leg
     ctx.fillStyle = bodyColor;
@@ -332,7 +410,10 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
     // Arms
     let armAngle = Math.sin(frame * 0.3) * 0.5;
     if (isLunging) armAngle = -1.5; // Arms up/forward
-    if (isRetreating) armAngle = -2.5; // Arms up in surrender
+    if (isRetreating) {
+        // Flailing arms in panic
+        armAngle = -2.5 + Math.sin(frame * 0.8) * 0.5;
+    }
     if (isPreLunge) armAngle += Math.sin(frame * 2) * 0.2;
 
     // Left Arm
@@ -391,7 +472,9 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
         ctx.beginPath(); ctx.moveTo(x + 17, y + 17); ctx.lineTo(x + 18, y + 20); ctx.lineTo(x + 19, y + 17); ctx.fill();
         ctx.beginPath(); ctx.moveTo(x + 21, y + 17); ctx.lineTo(x + 22, y + 20); ctx.lineTo(x + 23, y + 17); ctx.fill();
     } else if (isRetreating) {
-        ctx.beginPath(); ctx.arc(x + 20 + wobble, y + 21, 2, 0, Math.PI*2); ctx.fill();
+        // Panic mouth wobbling
+        const h = 2 + Math.random() * 2;
+        ctx.beginPath(); ctx.ellipse(x + 20 + wobble, y + 22, 3, h, 0, 0, Math.PI*2); ctx.fill();
     } else {
         ctx.fillRect(x + 16 + wobble, y + 20, 8, 2);
     }
@@ -420,115 +503,150 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
     if (state === 'jumping') {
         ctx.translate(0, -jumpHeight);
         ctx.beginPath();
-        ctx.ellipse(0, 5 + jumpHeight, 10, 3, 0, 0, Math.PI * 2); // Shadow on ground
+        ctx.ellipse(0, 15 + jumpHeight, 10, 3, 0, 0, Math.PI * 2); // Shadow on ground
         ctx.fill();
     } else if (state === 'crashed') {
-         // No specific shadow for crash pile, it's flat
+         // No specific shadow for crash pile
     } else {
          ctx.beginPath();
-         ctx.ellipse(0, 5, 10, 3, 0, 0, Math.PI * 2);
+         ctx.ellipse(0, 15, 10, 3, 0, 0, Math.PI * 2);
          ctx.fill();
     }
 
     if (state === 'crashed') {
-      // Detailed Crash Pile
-      ctx.fillStyle = '#1565C0'; // Pants
-      ctx.fillRect(-12, -4, 10, 6);
-      ctx.fillStyle = '#1976D2'; // Shirt
-      ctx.fillRect(-8, -10, 10, 8);
-      ctx.fillStyle = '#FF7043'; // Skis scattered
-      ctx.save(); ctx.rotate(0.5); ctx.fillRect(-10, -5, 20, 3); ctx.restore();
-      ctx.save(); ctx.rotate(-0.8); ctx.fillRect(-5, 5, 20, 3); ctx.restore();
-      // Head face down
-      ctx.fillStyle = '#FFCCBC';
-      ctx.beginPath(); ctx.arc(5, -5, 5, 0, Math.PI*2); ctx.fill();
-      // Stars
-      ctx.fillStyle = '#FFEB3B';
-      const starX = Math.sin(timeRef.current * 0.2) * 10;
-      ctx.fillRect(-5 + starX, -25, 4, 4);
+      // Popsicle Crashed - Lying down
+      ctx.save();
+      ctx.rotate(Math.PI / 2);
+      
+      // Broken Stick Legs removed
+
+      // Central Stick
+      ctx.fillStyle = '#D7CCC8'; 
+      ctx.fillRect(-8, 5, 8, 12);
+      
+      // Body (Pink Popsicle)
+      ctx.fillStyle = '#EC407A'; // Pink 400
+      fillRoundRect(ctx, -5, -10, 30, 20, 10);
+      
+      // Melted Puddle
+      ctx.fillStyle = 'rgba(236, 64, 122, 0.4)';
+      ctx.beginPath();
+      ctx.ellipse(10, 0, 15, 12, 0, 0, Math.PI*2);
+      ctx.fill();
+
+      // Face (Dizzy)
+      ctx.fillStyle = '#FFF'; // Eyes
+      ctx.beginPath(); ctx.arc(20, -4, 3, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(20, 4, 3, 0, Math.PI*2); ctx.fill();
+      
+      ctx.strokeStyle = '#000'; // X eyes
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(18, -6); ctx.lineTo(22, -2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(22, -6); ctx.lineTo(18, -2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(18, 2); ctx.lineTo(22, 6); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(22, 2); ctx.lineTo(18, 6); ctx.stroke();
+
+      // Skis scattered
+      ctx.restore();
+      ctx.fillStyle = '#42A5F5';
+      ctx.save(); ctx.rotate(0.5); ctx.fillRect(-15, -5, 25, 3); ctx.restore();
+      ctx.save(); ctx.rotate(-0.8); ctx.fillRect(-10, 5, 25, 3); ctx.restore();
 
     } else {
-      // Rotation
+      // Rotation logic
       const rotation = direction * (Math.PI / 6); 
       ctx.rotate(rotation);
       
-      // Skis
-      ctx.fillStyle = '#D84315'; // Deep Orange
+      // --- Skis ---
+      ctx.fillStyle = '#42A5F5'; // Blue Skis
       if (state === 'jumping') {
-         ctx.save(); ctx.rotate(Math.PI / 8); fillRoundRect(ctx, -6, 5, 4, 28, 2); ctx.restore();
-         ctx.save(); ctx.rotate(-Math.PI / 8); fillRoundRect(ctx, 2, 5, 4, 28, 2); ctx.restore();
+         ctx.save(); ctx.rotate(Math.PI / 8); fillRoundRect(ctx, -10, 12, 6, 30, 2); ctx.restore();
+         ctx.save(); ctx.rotate(-Math.PI / 8); fillRoundRect(ctx, 4, 12, 6, 30, 2); ctx.restore();
       } else {
          // Left Ski
-         fillRoundRect(ctx, -8, 5, 4, 28, 2);
+         fillRoundRect(ctx, -10, 12, 6, 30, 2);
          // Right Ski
-         fillRoundRect(ctx, 4, 5, 4, 28, 2);
-         // Ski Highlights
-         ctx.fillStyle = '#FF7043';
-         ctx.fillRect(-7, 5, 2, 26);
-         ctx.fillRect(5, 5, 2, 26);
+         fillRoundRect(ctx, 4, 12, 6, 30, 2);
+         // Ski Tips (Darker)
+         ctx.fillStyle = '#1E88E5';
+         ctx.fillRect(-10, 36, 6, 6);
+         ctx.fillRect(4, 36, 6, 6);
       }
+      
+      // --- Central Popsicle Stick ---
+      ctx.fillStyle = '#D7CCC8'; // Same wood color
+      ctx.fillRect(-2, 10, 4, 12); // Centered, protruding from bottom
 
-      // Legs (Pants)
-      ctx.fillStyle = '#1565C0'; // Dark Blue
+      // --- Boots Removed ---
+
+      // --- Body (The Popsicle) ---
+      // Main Body Color (Berry Pink)
+      const bodyPink = '#EC407A';
+      
+      // Draw Body (Pill Shape)
+      ctx.fillStyle = bodyPink;
+      fillRoundRect(ctx, -10, -15, 20, 30, 10);
+      
+      // Shading/Highlight on Head
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
       ctx.beginPath();
-      // Draw bent legs for skiing posture
-      ctx.moveTo(-6, 0);
-      ctx.lineTo(-6, 12); 
-      ctx.lineTo(-2, 12);
-      ctx.lineTo(0, 5); // Crotch
-      ctx.lineTo(2, 12);
-      ctx.lineTo(6, 12);
-      ctx.lineTo(6, 0);
+      ctx.ellipse(-4, -10, 3, 6, -0.5, 0, Math.PI*2);
       ctx.fill();
 
-      // Torso
-      ctx.fillStyle = '#1976D2'; // Blue
-      fillRoundRect(ctx, -7, -11, 14, 12, 3);
-      
-      // Arms (Dynamic poles)
-      ctx.strokeStyle = '#1565C0';
+      // --- Arms (Stick Arms) ---
+      ctx.strokeStyle = '#D7CCC8'; // Wood color for arms
       ctx.lineWidth = 3;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(-7, -8); ctx.lineTo(-11, 0); // Left arm
-      ctx.moveTo(7, -8); ctx.lineTo(11, 0);   // Right arm
+      // Arms coming from mid-body
+      ctx.moveTo(-9, 0); ctx.lineTo(-14, 6); // Left arm
+      ctx.moveTo(9, 0); ctx.lineTo(14, 6);   // Right arm
       ctx.stroke();
       
-      // Poles
+      // Gloves (Lime Green)
+      ctx.fillStyle = '#76FF03'; 
+      ctx.beginPath(); ctx.arc(-14, 6, 4, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(14, 6, 4, 0, Math.PI*2); ctx.fill();
+      
+      // --- Poles ---
       ctx.fillStyle = '#90A4AE';
-      ctx.fillRect(-13, -5, 2, 24); 
-      ctx.fillRect(13, -5, 2, 24);
+      ctx.fillRect(-16, -2, 2, 28); 
+      ctx.fillRect(16, -2, 2, 28);
+      // Pole baskets
+      ctx.fillStyle = '#37474F';
+      ctx.beginPath(); ctx.arc(-15, 24, 3, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(17, 24, 3, 0, Math.PI*2); ctx.fill();
 
-      // Head
-      ctx.fillStyle = '#FFCCBC';
-      ctx.beginPath();
-      ctx.arc(0, -15, 5, 0, Math.PI * 2);
-      ctx.fill();
+      // --- Face ---
+      // Goggles
+      ctx.fillStyle = '#3949AB'; // Frame
+      fillRoundRect(ctx, -9, -12, 18, 10, 3);
       
-      // Hat
-      ctx.fillStyle = '#D32F2F';
-      ctx.beginPath();
-      ctx.moveTo(-6, -16);
-      ctx.quadraticCurveTo(0, -24, 6, -16);
-      ctx.lineTo(6, -15);
-      ctx.lineTo(-6, -15);
-      ctx.fill();
-      // Pom pom
-      ctx.fillStyle = '#FFFFFF';
-      ctx.beginPath(); ctx.arc(0, -22, 2, 0, Math.PI*2); ctx.fill();
+      // Lens (Gradient)
+      const goggleGrad = ctx.createLinearGradient(-8, -12, 8, -2);
+      goggleGrad.addColorStop(0, '#00E5FF'); // Cyan
+      goggleGrad.addColorStop(1, '#00B0FF'); // Blue
+      ctx.fillStyle = goggleGrad;
+      fillRoundRect(ctx, -7, -10, 14, 6, 2);
       
-      // Scarf Physics
-      if (p.speed > 5 || state === 'jumping') {
-         ctx.fillStyle = (p.speed > MAX_SPEED + 2 && timeRef.current % 4 < 2) ? '#FFEB3B' : '#FDD835'; // Flash if super fast
-         ctx.beginPath();
-         ctx.moveTo(2, -13);
-         const sway = Math.sin(timeRef.current * 0.2) * 5;
-         const length = 10 + (p.speed * 1.5);
-         ctx.lineTo(length + Math.abs(sway), -13 + sway);
-         ctx.lineTo(length + Math.abs(sway) - 2, -9 + sway);
-         ctx.lineTo(2, -9);
-         ctx.fill();
-      }
+      // Reflection
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.beginPath();
+      ctx.moveTo(-4, -10); ctx.lineTo(0, -10); ctx.lineTo(-2, -4); ctx.lineTo(-6, -4);
+      ctx.fill();
+
+      // Mouth (Smile)
+      ctx.strokeStyle = '#880E4F';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, -1, 3, 0.2, Math.PI - 0.2);
+      ctx.stroke();
+      
+      // Eyebrows (Floating above goggles for expression)
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(-6, -14); ctx.lineTo(-3, -15); ctx.stroke(); // Left
+      ctx.beginPath(); ctx.moveTo(3, -15); ctx.lineTo(6, -14); ctx.stroke();  // Right
     }
     ctx.restore();
   };
@@ -537,21 +655,35 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
   const spawnEntities = (startY: number, endY: number) => {
     const playerX = playerRef.current.x;
     
+    // Calculate Difficulty
+    const difficultyTier = Math.floor(startY / 2000); // 0, 1, 2, 3...
+    
     // Spawn Gameplay Entities
     for (let y = startY; y < endY; y += 30) {
-      const difficultyTier = Math.floor(y / 2000);
+      
+      // Obstacle Chance: Increases with difficulty
       const baseChance = 0.15;
-      const addedChance = Math.min(difficultyTier * 0.08, 0.5); 
+      const addedChance = Math.min(difficultyTier * 0.05, 0.6); // Cap density increase
       const obstacleChance = baseChance + addedChance;
+
+      // Power Up Chance: REDUCED for Coffee
+      const basePowerUpChance = 0.03;
+      const addedPowerUpChance = Math.min(difficultyTier * 0.01, 0.10);
+      const powerUpChance = basePowerUpChance + addedPowerUpChance;
 
       const spawnX = () => playerX + (Math.random() * CANVAS_WIDTH * 3) - (CANVAS_WIDTH * 1.5);
 
       if (Math.random() < obstacleChance) { 
         const typeRoll = Math.random();
         let type = EntityType.TREE;
-        if (typeRoll > 0.7) type = EntityType.ROCK;
-        else if (typeRoll > 0.9) type = EntityType.STUMP;
-        else if (typeRoll > 0.6 && typeRoll <= 0.7) type = EntityType.SNOW_MOUND;
+        
+        // Snow Mounds become much more frequent as difficulty increases
+        // Was 0.10 + 0.05*tier. Now 0.10 + 0.15*tier, capped at 80% of obstacles.
+        const moundChance = 0.10 + Math.min(difficultyTier * 0.15, 0.80);
+        
+        if (typeRoll < moundChance) type = EntityType.SNOW_MOUND;
+        else if (typeRoll > 0.8) type = EntityType.ROCK;
+        else if (typeRoll > 0.95) type = EntityType.STUMP;
 
         entitiesRef.current.push({
           id: Math.random(),
@@ -563,7 +695,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
         });
       }
 
-      if (Math.random() < 0.03) {
+      // Boost Pad
+      if (Math.random() < powerUpChance * 2) {
         entitiesRef.current.push({
             id: Math.random(),
             type: EntityType.BOOST_PAD,
@@ -574,7 +707,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
         });
       }
 
-      if (Math.random() < 0.01) { 
+      // Super Mushroom
+      if (Math.random() < powerUpChance) { 
         entitiesRef.current.push({
             id: Math.random(),
             type: EntityType.SUPER_MUSHROOM,
@@ -583,6 +717,18 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
             width: 20,
             height: 20
         });
+      }
+
+      // Ammo (Coffee) - Reduced spawn rate (0.5x chance instead of 2x)
+      if (Math.random() < powerUpChance * 0.5) { 
+          entitiesRef.current.push({
+              id: Math.random(),
+              type: EntityType.COFFEE,
+              x: spawnX(),
+              y: y + Math.random() * 50,
+              width: 20,
+              height: 20
+          });
       }
     }
 
@@ -691,8 +837,9 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
   };
 
   const resetGame = () => {
-    playerRef.current = { x: CANVAS_WIDTH / 2, y: 100, speed: 0, direction: 0, state: 'skiing', jumpHeight: 0, jumpVelocity: 0, powerUpTimer: 0 };
+    playerRef.current = { x: CANVAS_WIDTH / 2, y: 100, speed: 0, direction: 0, state: 'skiing', jumpHeight: 0, jumpVelocity: 0, powerUpTimer: 0, coffee: 0 };
     entitiesRef.current = [];
+    projectilesRef.current = [];
     groundFeaturesRef.current = [];
     scoreRef.current = 0;
     yetiRef.current = null;
@@ -719,22 +866,67 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
       }
       
       if (inputRef.current['ArrowDown']) {
-        player.speed = Math.min(player.speed + ACCEL, MAX_SPEED);
+        // Accelerate if below normal max. 
+        // If we are boosted (speed > NORMAL_MAX), holding down won't accelerate us further,
+        // but it will maintain speed/prevent drag decay faster than just cruising.
+        if (player.speed < PLAYER_NORMAL_MAX) {
+            player.speed = Math.min(player.speed + PLAYER_ACCEL, PLAYER_NORMAL_MAX);
+        } else {
+             // Slowly decay boost even if holding down, so boost isn't infinite
+             player.speed -= 0.02;
+        }
       } else {
         const slopeFactor = 1 - (Math.abs(player.direction) / 2.5);
-        const targetSpeed = CRUISE_SPEED * slopeFactor;
+        // Base cruising speed (PLAYER_CRUISE_SPEED instead of magic '8')
+        const targetSpeed = PLAYER_CRUISE_SPEED * slopeFactor;
         
         if (player.speed > targetSpeed) {
             player.speed = Math.max(targetSpeed, player.speed - DRAG);
         } else {
+            // Passive gravity acceleration
             player.speed += 0.05 * slopeFactor; 
         }
       }
 
+      // Cap speed to Global Limit
+      if (player.speed > GLOBAL_SPEED_LIMIT) player.speed = GLOBAL_SPEED_LIMIT;
+
       if (inputRef.current['ArrowUp'] && player.state === 'skiing') {
         player.state = 'jumping';
         player.jumpVelocity = JUMP_STRENGTH;
-        player.speed = Math.min(player.speed + 1, MAX_SPEED);
+        // Small speed boost on jump, capped at Global
+        player.speed = Math.min(player.speed + 0.5, GLOBAL_SPEED_LIMIT);
+      }
+
+      // Coffee firing (Space bar)
+      if (inputRef.current['Space'] && player.coffee > 0 && timeRef.current - lastFireTimeRef.current > 20) {
+          player.coffee--;
+          lastFireTimeRef.current = timeRef.current;
+          
+          let vx = 0;
+          let vy = -PROJECTILE_SPEED; // Default up/backwards
+
+          // Initial aim logic (still useful for initial trajectory)
+          if (yetiRef.current) {
+              const dx = yetiRef.current.x - player.x;
+              const dy = yetiRef.current.y - player.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist > 0) {
+                  vx = (dx / dist) * PROJECTILE_SPEED;
+                  vy = (dy / dist) * PROJECTILE_SPEED;
+              }
+          }
+
+          projectilesRef.current.push({
+              id: Math.random(),
+              type: EntityType.COFFEE_CUP,
+              x: player.x,
+              y: player.y - 20,
+              width: 10,
+              height: 10,
+              vx,
+              vy
+          });
       }
       
       if (player.speed < 0) player.speed = 0;
@@ -766,24 +958,68 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
     entitiesRef.current = entitiesRef.current.filter(e => e.y > topEdge);
     groundFeaturesRef.current = groundFeaturesRef.current.filter(e => e.y > topEdge);
     
+    // Projectiles: Update & Homing Logic
+    projectilesRef.current.forEach(p => {
+        // Auto-aim homing towards Yeti
+        if (yetiRef.current) {
+            const yetiCenterX = yetiRef.current.x + 20;
+            const yetiCenterY = yetiRef.current.y + 25;
+            const dx = yetiCenterX - p.x;
+            const dy = yetiCenterY - p.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            // Only adjust if projectile is active and moving
+            if (dist > 0) {
+                 const speed = PROJECTILE_SPEED; // Maintain projectile speed
+                 // Steering: Directly update velocity vector to point at Yeti
+                 p.vx = (dx / dist) * speed;
+                 p.vy = (dy / dist) * speed;
+            }
+        }
+
+        if (p.vx !== undefined) p.x += p.vx;
+        if (p.vy !== undefined) p.y += p.vy;
+    });
+    
+    projectilesRef.current = projectilesRef.current.filter(p => {
+        // Keep projectile alive longer if tracking yeti
+        const boundMargin = yetiRef.current ? 1000 : 500;
+        return p.x > player.x - boundMargin && p.x < player.x + boundMargin && 
+               p.y > player.y - boundMargin && p.y < player.y + boundMargin;
+    });
+
     const lastEntityY = entitiesRef.current.length > 0 ? entitiesRef.current[entitiesRef.current.length - 1].y : 0;
     if (lastEntityY < bottomEdge + 500) {
       spawnEntities(Math.max(lastEntityY, bottomEdge), bottomEdge + 500);
     }
 
     // 4. Yeti Logic
-    if (player.y > YETI_SPAWN_DIST && !yetiRef.current && (player.state === 'skiing' || player.state === 'jumping')) {
-      yetiRef.current = {
-        id: -1,
-        type: EntityType.YETI,
-        x: player.x - 300, 
-        y: player.y - 400,
-        width: 40,
-        height: 50,
-        mode: 'CHASE',
-        modeTimer: 0
-      };
-      onCommentary("RROOOAAAARRRR! The Yeti has spotted you!");
+    if (yetiRef.current) {
+        const dx = player.x - yetiRef.current.x;
+        const dy = player.y - yetiRef.current.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        
+        if (dist > 1500) {
+            yetiRef.current = null;
+        }
+    }
+
+    // Yeti Spawn Logic
+    if (player.y > YETI_MIN_SPAWN_DIST && !yetiRef.current && (player.state === 'skiing' || player.state === 'jumping')) {
+        if (Math.random() < 0.01) {
+            yetiRef.current = {
+                id: -1,
+                type: EntityType.YETI,
+                x: player.x - 300, 
+                y: player.y - 400,
+                width: 40,
+                height: 50,
+                mode: 'CHASE',
+                modeTimer: 0,
+                currentSpeed: YETI_BASE_SPEED
+            };
+            onCommentary("RROOOAAAARRRR! The Yeti has spotted you!");
+        }
     }
 
     if (yetiRef.current) {
@@ -792,13 +1028,29 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
       const dy = player.y - yeti.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
+      // Projectile Collision with Yeti
+      projectilesRef.current.forEach((proj, index) => {
+          const pdx = yeti.x + 20 - proj.x;
+          const pdy = yeti.y + 25 - proj.y;
+          if (Math.sqrt(pdx*pdx + pdy*pdy) < 30) {
+              // HIT!
+              projectilesRef.current.splice(index, 1);
+              yeti.mode = 'RETREAT';
+              yeti.modeTimer = YETI_SCARE_DURATION;
+              onCommentary("CAFFEINE OVERLOAD! Yeti is retreating!");
+          }
+      });
+
       if (player.powerUpTimer > 0 && yeti.mode !== 'RETREAT') {
           yeti.mode = 'RETREAT';
           yeti.modeTimer = YETI_SCARE_DURATION;
           onCommentary("The Yeti is scared of your size!");
       }
 
-      if (dist < 10 && player.state !== 'eaten' && player.powerUpTimer <= 0) {
+      // Yeti Hit Check (Collision with Player)
+      const hitRadius = yeti.mode === 'LUNGE' ? 30 : 10; 
+
+      if (dist < hitRadius && player.state !== 'eaten' && player.powerUpTimer <= 0) {
         player.state = 'eaten';
         player.speed = 0;
         setGameState(GameState.EATEN);
@@ -810,14 +1062,15 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
             if (yeti.mode === 'CHASE') {
                 if (Math.random() < 0.02) { 
                     yeti.mode = 'PRE_LUNGE';
-                    yeti.modeTimer = 30; 
+                    yeti.modeTimer = 30; // 0.5s warning
                 }
             } else if (yeti.mode === 'PRE_LUNGE') {
                 yeti.mode = 'LUNGE';
-                yeti.modeTimer = 60; 
+                yeti.modeTimer = 40; // Short, fast burst
+                onCommentary("LUNGE!"); 
             } else if (yeti.mode === 'LUNGE') {
                 yeti.mode = 'CHASE';
-                yeti.modeTimer = 120;
+                yeti.modeTimer = 120; // Cooldown
             } else if (yeti.mode === 'RETREAT') {
                 yeti.mode = 'CHASE';
             }
@@ -828,23 +1081,43 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
 
         if (yeti.mode === 'CHASE') {
             const urgency = Math.min(dist / 400, 1); 
-            targetSpeed = (YETI_SPEED_MIN + (YETI_SPEED_MAX - YETI_SPEED_MIN) * urgency) * difficultyMultiplier;
+            // Calculate Desired Speed based on distance urgency
+            // Yeti Base is 60 (15), Max is 85 (21.25)
+            // If urgency is 1 (close), he goes max.
+            let desiredMax = (YETI_BASE_SPEED + (YETI_TOP_SPEED - YETI_BASE_SPEED) * urgency) * difficultyMultiplier;
+            if (desiredMax > YETI_TOP_SPEED) desiredMax = YETI_TOP_SPEED;
+            
+            targetSpeed = desiredMax;
             yeti.x += Math.sin(timeRef.current * 0.05) * 2; 
 
         } else if (yeti.mode === 'PRE_LUNGE') {
-            targetSpeed = YETI_SPEED_MIN * 0.2; 
-            yeti.x += (Math.random() - 0.5) * 6;
+            targetSpeed = YETI_BASE_SPEED * 0.5; // Slow down before lunge (coil up)
+            yeti.x += (Math.random() - 0.5) * 6; // Shake
         } else if (yeti.mode === 'LUNGE') {
-            targetSpeed = (MAX_SPEED * 1.5) * difficultyMultiplier;
+            targetSpeed = YETI_TOP_SPEED * 1.5; // SPEED BURST during lunge (127.5 scaled -> ~32px/frame)
         } else if (yeti.mode === 'RETREAT') {
-            targetSpeed = -4; 
+            targetSpeed = -6; 
         }
 
+        // Apply Acceleration Logic for Yeti
+        let accel = YETI_ACCEL_FACTOR * 4;
+        if (yeti.mode === 'LUNGE') accel = 1.0; // Instant acceleration for dash
+
+        if (yeti.currentSpeed < targetSpeed) {
+            yeti.currentSpeed += accel;
+        } else {
+            yeti.currentSpeed -= YETI_ACCEL_FACTOR * 2; 
+        }
+
+        // Movement
         if (yeti.mode === 'RETREAT') {
-            yeti.y += targetSpeed;
-        } else if (dist > 10) {
-            yeti.x += (dx / dist) * targetSpeed;
-            yeti.y += (dy / dist) * targetSpeed;
+            yeti.y += yeti.currentSpeed;
+        } else {
+             // Standard movement towards player
+             if (dist > 5) { // Stop jittering when on top
+                yeti.x += (dx / dist) * yeti.currentSpeed;
+                yeti.y += (dy / dist) * yeti.currentSpeed;
+             }
         }
       }
     }
@@ -856,7 +1129,8 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
       entitiesRef.current = entitiesRef.current.filter(e => {
         if (checkCollision(player, e)) {
             if (e.type === EntityType.BOOST_PAD) {
-                player.speed = Math.min(player.speed + 8, ABSOLUTE_MAX_SPEED);
+                // Boost pushes player to BOOST Speed (95 on scale)
+                player.speed = PLAYER_BOOST_SPEED;
                 collidedWithPad = true;
                 return false; 
             }
@@ -864,9 +1138,13 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
                 player.powerUpTimer = POWERUP_DURATION;
                 return false; 
             }
+            if (e.type === EntityType.COFFEE) {
+                player.coffee += COFFEE_PER_PICKUP;
+                return false;
+            }
             if (e.type === EntityType.SNOW_MOUND) {
                 if (player.powerUpTimer > 0) return false; 
-                player.speed *= 0.75;
+                player.speed *= 0.65; // Significant slow down
                 return false;
             }
             
@@ -932,8 +1210,14 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
         case EntityType.SNOW_MOUND: drawHighFiSnowMound(ctx, e.x, e.y); break;
         case EntityType.BOOST_PAD: drawHighFiBoostPad(ctx, e.x, e.y); break;
         case EntityType.SUPER_MUSHROOM: drawHighFiSuperMushroom(ctx, e.x, e.y); break;
+        case EntityType.COFFEE: drawCoffeePickup(ctx, e.x, e.y); break;
         default: ctx.fillStyle='purple'; ctx.fillRect(e.x, e.y, e.width, e.height);
       }
+    });
+
+    // Draw Projectiles
+    projectilesRef.current.forEach(p => {
+        drawCoffeeProjectile(ctx, p.x, p.y);
     });
 
     drawHighFiSkier(ctx, player);
@@ -944,6 +1228,17 @@ const GameCanvas: React.FC<GameCanvasProps> = ({ setGameState, setScore, gameSta
 
     ctx.restore();
     drawSnowflakes(ctx);
+
+    // --- UI Overlay ---
+    // Ammo Count
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.roundRect(CANVAS_WIDTH - 130, 20, 110, 40, 5);
+    ctx.fill();
+    ctx.fillStyle = '#FFF';
+    ctx.font = 'bold 16px Courier New';
+    ctx.fillText(`COFFEE: ${player.coffee}`, CANVAS_WIDTH - 120, 45);
+    ctx.restore();
 
     requestRef.current = requestAnimationFrame(() => {
       update();
